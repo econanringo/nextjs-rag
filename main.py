@@ -1,5 +1,11 @@
+#!/usr/bin/env python3
 """
 Next.js 公式ドキュメント RAG（retrieve: next-devtools-mcp の nextjs_docs）。
+
+次のいずれでも起動できます:
+  python main.py "質問"
+  python -m rag_nextjs "質問"
+  rag-nextjs "質問"   （リポジトリで pip install -e . 後）
 
 使用例:
   python main.py "App Router で Server Actions を使うには？"
@@ -14,43 +20,16 @@ Next.js 公式ドキュメント RAG（retrieve: next-devtools-mcp の nextjs_do
   CHAT_MAX_TOKENS（任意）
   CHAT_HTTP_TIMEOUT_SECONDS / OPENAI_TIMEOUT / HTTP_TIMEOUT（秒、既定 600）
   CHAT_HTTP_CONNECT_SECONDS（接続タイムアウト秒、既定 30）
+  RAG_SPINNER（既定: 1。0 でモデル待ちのアニメーションをオフ／進捗行のみまたは無音）
+  RAG_SPINNER_FORCE（既定: 0。TTY でなくてもスピナーを試すとき 1）
+  RAG_QUIET（既定: 0。進捗表示をすべて抑止 = --quiet と同種）
   NEXTJS_MCP_COMMAND（既定: npx -y next-devtools-mcp）
   CHAT_EXTRA_BODY（任意: OpenAI クライアントの extra_body に渡す JSON）
 """
 
 from __future__ import annotations
 
-import argparse
-import asyncio
-import os
-import sys
-
-from dotenv import load_dotenv
-
-
-def main() -> None:
-    load_dotenv()
-    if not os.getenv("NVIDIA_API_KEY") and not os.getenv("OPENAI_API_KEY"):
-        print(
-            "エラー: NVIDIA_API_KEY または OPENAI_API_KEY を .env に設定してください。",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    parser = argparse.ArgumentParser(description="Next.js MCP 公式ドキュメント RAG")
-    parser.add_argument("question", help="Next.js についての質問")
-    parser.add_argument(
-        "--top-k",
-        type=int,
-        default=int(os.getenv("RAG_TOP_K", "4")),
-        help="取得するドキュメントページ数（既定 4）",
-    )
-    args = parser.parse_args()
-
-    from rag_nextjs.answer import run_rag_cli
-
-    asyncio.run(run_rag_cli(args.question, top_k=args.top_k))
-
+from rag_nextjs.cli import main
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

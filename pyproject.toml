@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nextjs-docs-rag"
+version = "0.1.0"
+description = "Next.js 公式ドキュメント RAG CLI (next-devtools-mcp)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "openai>=1.0.0",
+  "python-dotenv>=1.0.0",
+  "mcp>=1.27.0",
+]
+
+[project.scripts]
+rag-nextjs = "rag_nextjs.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["rag_nextjs"]

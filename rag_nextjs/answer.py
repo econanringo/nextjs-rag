@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator, Mapping
+import sys
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 from openai import OpenAI
 
+from rag_nextjs.console_status import ConsoleProgress, run_sync_blocking_with_spinner
 from rag_nextjs.indexing import rank_doc_paths
 from rag_nextjs.mcp_docs import (
     fetch_nextjs_docs_page,
@@ -164,14 +166,20 @@ async def gather_context(
     session: ClientSession,
     question: str,
     top_k: int,
+    *,
+    on_phase: Callable[[str, str], None] | None = None,
 ) -> tuple[str, list[str]]:
+    if on_phase:
+        on_phase("インデックスを読み込み中", "")
     index = await read_llms_index(session)
     paths = rank_doc_paths(question, index, top_k=top_k)
     if not paths:
         return "", []
 
     pages: list[dict[str, Any]] = []
-    for path in paths:
+    for i, path in enumerate(paths, 1):
+        if on_phase:
+            on_phase("ドキュメント本文を取得中", f"{i}/{len(paths)}  {path}")
         try:
             pages.append(await fetch_nextjs_docs_page(session, path))
         except Exception as exc:  # noqa: BLE001
@@ -266,21 +274,35 @@ def stream_answer(question: str, context: str) -> Iterator[str]:
         yield from _non_stream_completion(client, kwargs_ns)
 
 
-async def run_rag_cli(question: str, top_k: int) -> None:
+async def run_rag_cli(question: str, top_k: int, *, quiet: bool = False) -> None:
     params = next_devtools_stdio_params()
+
+    quiet = quiet or _env_bool("RAG_QUIET", False)
+    progress = ConsoleProgress(enabled=not quiet)
 
     context = ""
     paths: list[str] = []
 
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            try:
-                await session.call_tool("init", {"project_path": os.getcwd()})
-            except Exception:
-                pass
+    try:
+        progress.start("next-devtools-mcp を起動・接続中 …")
 
-            context, paths = await gather_context(session, question, top_k=top_k)
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                progress.phase("next-devtools-mcp と通信中 …", "")
+                try:
+                    await session.call_tool("init", {"project_path": os.getcwd()})
+                except Exception:
+                    pass
+
+                context, paths = await gather_context(
+                    session,
+                    question,
+                    top_k,
+                    on_phase=lambda main, detail="": progress.phase(main, detail),
+                )
+    finally:
+        progress.stop_clear()
 
     # MCP 子プロセスを閉じてから LLM ストリーム（空 choices チャンク等の異常時にセッションを巻き込まない）
     if paths:
@@ -290,6 +312,22 @@ async def run_rag_cli(question: str, top_k: int) -> None:
         print("関連ドキュメントを取得できませんでした。質問の表現を変えて再度お試しください。")
         return
 
-    for piece in stream_answer(question, context):
-        print(piece, end="", flush=True)
-    print()
+    iterator = iter(stream_answer(question, context))
+    first = run_sync_blocking_with_spinner(
+        lambda: next(iterator, None),
+        out=sys.stderr,
+        main="モデル応答を待機中",
+        detail=_model_name(),
+        enabled=(not quiet),
+    )
+    if first is None:
+        print()
+        return
+
+    sys.stdout.write(first)
+    sys.stdout.flush()
+    for piece in iterator:
+        sys.stdout.write(piece)
+        sys.stdout.flush()
+    sys.stdout.write("\n")
+    sys.stdout.flush()

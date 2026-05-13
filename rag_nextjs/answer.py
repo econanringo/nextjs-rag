@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 from mcp import ClientSession
@@ -17,15 +17,130 @@ from rag_nextjs.mcp_docs import (
 )
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _client_http_timeout() -> Any:
+    """HTTP タイムアウト。巨大モデルや遅いゲートウェイ向けに環境変数で延長可能。"""
+    import httpx
+
+    raw = (
+        os.getenv("OPENAI_TIMEOUT")
+        or os.getenv("HTTP_TIMEOUT")
+        or os.getenv("CHAT_HTTP_TIMEOUT_SECONDS")
+    )
+    seconds = float(raw) if raw else 600.0
+    connect_raw = os.getenv("CHAT_HTTP_CONNECT_SECONDS")
+    connect = float(connect_raw) if connect_raw else 30.0
+    return httpx.Timeout(timeout=seconds, connect=connect)
+
+
 def _get_client() -> OpenAI:
     base = os.getenv("OPENAI_BASE_URL") or os.getenv("NVIDIA_OPENAI_BASE_URL")
     key = os.getenv("OPENAI_API_KEY") or os.getenv("NVIDIA_API_KEY")
     if not key:
         raise RuntimeError("OPENAI_API_KEY または NVIDIA_API_KEY を .env に設定してください")
-    kwargs: dict[str, Any] = {"api_key": key}
+    kwargs: dict[str, Any] = {"api_key": key, "timeout": _client_http_timeout()}
     if base:
         kwargs["base_url"] = base
     return OpenAI(**kwargs)
+
+
+# OpenAI 互換 API が delta に載せる推論テキスト系フィールド（ベンダー差を吸収）
+_DELTA_REASONING_KEYS: tuple[str, ...] = (
+    "reasoning_content",
+    "reasoning",
+    "thinking",
+    "thought",
+)
+
+
+def _get_str_field(obj: Any, key: str) -> str | None:
+    if obj is None:
+        return None
+    if isinstance(obj, Mapping):
+        val = obj.get(key)
+    else:
+        val = getattr(obj, key, None)
+    if isinstance(val, str) and val:
+        return val
+    return None
+
+
+def _stringify_content_field(content: Any) -> str | None:
+    """message / delta の content が str だけでなく list[dict] 形式のときに連結して返す。"""
+    if content is None:
+        return None
+    if isinstance(content, str):
+        return content if content.strip() else None
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str) and block:
+                parts.append(block)
+                continue
+            if isinstance(block, Mapping):
+                t = block.get("text")
+                if isinstance(t, str) and t:
+                    parts.append(t)
+                    continue
+                if block.get("type") == "text":
+                    nested = block.get("text")
+                    if isinstance(nested, str) and nested:
+                        parts.append(nested)
+        return "".join(parts) if parts else None
+    return None
+
+
+def _iter_delta_text_parts(delta: Any) -> Iterator[str]:
+    """ストリーミング chunk の delta から、表示すべき文字列を順に取り出す。"""
+    if delta is None:
+        return
+    for key in _DELTA_REASONING_KEYS:
+        s = _get_str_field(delta, key)
+        if s:
+            yield s
+    ref = _get_str_field(delta, "refusal")
+    if ref:
+        yield ref
+    raw_c = getattr(delta, "content", None) if not isinstance(delta, Mapping) else delta.get("content")
+    c = _stringify_content_field(raw_c)
+    if c:
+        yield c
+
+
+def _iter_message_text_parts(message: Any) -> Iterator[str]:
+    """非ストリーミング応答の message から表示用テキストを取り出す。"""
+    if message is None:
+        return
+    for key in _DELTA_REASONING_KEYS:
+        s = _get_str_field(message, key)
+        if s:
+            yield s
+    ref = _get_str_field(message, "refusal")
+    if ref:
+        yield ref
+    raw_c = getattr(message, "content", None) if not isinstance(message, Mapping) else message.get(
+        "content"
+    )
+    c = _stringify_content_field(raw_c)
+    if c:
+        yield c
+
+
+def _iter_chunk_text_parts(chunk: Any) -> Iterator[str]:
+    """ChatCompletionChunk 互換オブジェクトからテキスト断片を取り出す。"""
+    choices = getattr(chunk, "choices", None) or []
+    for choice in choices:
+        delta = getattr(choice, "delta", None)
+        yield from _iter_delta_text_parts(delta)
+        # 一部プロキシはストリーム終端付近で message に本文だけ載せる
+        msg = getattr(choice, "message", None)
+        yield from _iter_message_text_parts(msg)
 
 
 def _model_name() -> str:
@@ -65,40 +180,90 @@ async def gather_context(
     return format_fetched_pages(pages), paths
 
 
-def stream_answer(question: str, context: str) -> Iterator[str]:
-    client = _get_client()
+def _extra_body_from_env() -> dict[str, Any]:
+    raw_extra = os.getenv("CHAT_EXTRA_BODY")
+    if not raw_extra:
+        return {}
+    import json
+
+    return json.loads(raw_extra)
+
+
+def _build_chat_completion_kwargs(question: str, context: str, *, stream: bool) -> dict[str, Any]:
     model = _model_name()
     messages = _build_messages(question, context)
-    extra: dict[str, Any] = {}
-    raw_extra = os.getenv("CHAT_EXTRA_BODY")
-    if raw_extra:
-        import json
+    extra = _extra_body_from_env()
 
-        extra = json.loads(raw_extra)
-
-    kwargs_call: dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": float(os.getenv("CHAT_TEMPERATURE", "0.2")),
-        "stream": True,
+        "stream": stream,
     }
+
+    mt = os.getenv("CHAT_MAX_TOKENS")
+    if mt and mt.strip():
+        kwargs["max_tokens"] = int(mt.strip())
+
     if extra:
-        kwargs_call["extra_body"] = extra
+        kwargs["extra_body"] = extra
 
-    stream = client.chat.completions.create(**kwargs_call)
+    if stream and _env_bool("CHAT_STREAM_INCLUDE_USAGE", False):
+        kwargs["stream_options"] = {"include_usage": True}
 
-    for chunk in stream:
-        choices = getattr(chunk, "choices", None) or []
-        if not choices:
-            continue
-        delta = choices[0].delta
-        if delta is None:
-            continue
-        reasoning = getattr(delta, "reasoning_content", None)
-        if reasoning:
-            yield reasoning
-        if delta.content is not None:
-            yield delta.content
+    return kwargs
+
+
+def _non_stream_completion(client: OpenAI, kwargs: dict[str, Any]) -> Iterator[str]:
+    kw = dict(kwargs)
+    kw["stream"] = False
+    kw.pop("stream_options", None)
+    resp = client.chat.completions.create(**kw)
+    choices = getattr(resp, "choices", None) or []
+    if not choices:
+        yield "[エラー] API 応答に choices がありません。"
+        return
+    msg = getattr(choices[0], "message", None)
+    parts = list(_iter_message_text_parts(msg))
+    if parts:
+        for p in parts:
+            yield p
+        return
+    first = choices[0]
+    yield (
+        "[エラー] メッセージ本文を取得できませんでした。"
+        f" finish_reason={getattr(first, 'finish_reason', None)!r}"
+    )
+
+
+def stream_answer(question: str, context: str) -> Iterator[str]:
+    """OpenAI Chat Completions 互換エンドポイント向け。ストリーム非対応・空ストリームのモデルは非ストリームにフォールバック。"""
+    client = _get_client()
+    use_stream = _env_bool("CHAT_STREAM", True)
+    fb = _env_bool("CHAT_STREAM_FALLBACK", True)
+
+    if not use_stream:
+        kwargs = _build_chat_completion_kwargs(question, context, stream=False)
+        yield from _non_stream_completion(client, kwargs)
+        return
+
+    kwargs_stream = _build_chat_completion_kwargs(question, context, stream=True)
+    stream = client.chat.completions.create(**kwargs_stream)
+
+    got_text = False
+    try:
+        for chunk in stream:
+            for piece in _iter_chunk_text_parts(chunk):
+                got_text = True
+                yield piece
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+
+    if not got_text and fb:
+        kwargs_ns = _build_chat_completion_kwargs(question, context, stream=False)
+        yield from _non_stream_completion(client, kwargs_ns)
 
 
 async def run_rag_cli(question: str, top_k: int) -> None:

@@ -9,6 +9,11 @@ Next.js 公式ドキュメント RAG（retrieve: next-devtools-mcp の nextjs_do
   NVIDIA_API_KEY / OPENAI_API_KEY
   OPENAI_BASE_URL または NVIDIA_OPENAI_BASE_URL（NVIDIA Integrate など）
   CHAT_MODEL（既定: nvidia/nemotron-3-nano-30b-a3b）
+  CHAT_STREAM（既定: 1。0 で常に非ストリーミング）
+  CHAT_STREAM_FALLBACK（既定: 1。ストリームから本文が得られないとき非ストリームで再試行）
+  CHAT_MAX_TOKENS（任意）
+  CHAT_HTTP_TIMEOUT_SECONDS / OPENAI_TIMEOUT / HTTP_TIMEOUT（秒、既定 600）
+  CHAT_HTTP_CONNECT_SECONDS（接続タイムアウト秒、既定 30）
   NEXTJS_MCP_COMMAND（既定: npx -y next-devtools-mcp）
   CHAT_EXTRA_BODY（任意: OpenAI クライアントの extra_body に渡す JSON）
 """

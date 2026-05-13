@@ -1,9 +1,9 @@
-# Publish `nextjs-docs-rag` to PyPI when a GitHub Release is published.
+# Publish `rag-nextjs` to PyPI when a GitHub Release is published.
 #
 # Prerequisites (Trusted Publishing — recommended):
 #   1. https://pypi.org/manage/account/publishing/
 #      Add your GitHub repo as an "pending" trusted publisher:
-#      - PyPI project name: nextjs-docs-rag
+#      - PyPI project name: rag-nextjs
 #      - Owner / repo / workflow filename: matching this repo and this file
 #
 #   2. GitHub repo → Settings → Environments → create `pypi`

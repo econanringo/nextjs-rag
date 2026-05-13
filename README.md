@@ -38,6 +38,7 @@ cp .env.example .env
 | `CHAT_EXTRA_BODY` | いいえ | `extra_body` に渡す JSON（例: Nemotron の推論オプション）。1 行の JSON 文字列 |
 | `CHAT_STREAM` | いいえ | `1` / `true` / `yes` / `on` でストリーミング（既定）。`0` など falsy で常に **非ストリーミング** のみ送信 |
 | `CHAT_STREAM_FALLBACK` | いいえ | 既定オン。ストリームを最後まで読んでも表示用テキストが一度も出ないとき、同じ入力で **非ストリーミングを 1 回** 試す |
+| `CHAT_SHOW_REASONING` | いいえ | 既定オフ。オンにすると `reasoning_content` 等の **推論テキストも標準出力**に流す。推論付きモデルの通常利用ではオフのままがよい |
 | `CHAT_MAX_TOKENS` | いいえ | 設定時のみ、`max_tokens` としてリクエストに付与 |
 | `CHAT_STREAM_INCLUDE_USAGE` | いいえ | オン時、ストリーミング要求に `stream_options: {"include_usage": true}` を付与（使用量を最終チャンクで受け取る用途） |
 | `CHAT_HTTP_TIMEOUT_SECONDS` | いいえ | 読み取り込みを含む HTTP タイムアウト（秒）。既定: `600` |
@@ -54,7 +55,7 @@ cp .env.example .env
 OpenAI の Chat Completions 互換エンドポイントを前提にしています。プロバイダやモデルによって次のような差があります。
 
 - **ストリーム本文の欠落** … ゲートウェイ側でストリーミングの `delta` に本文が載らない場合がある → 既定では `CHAT_STREAM_FALLBACK` により **非ストリームで再試行**。
-- **推論フィールドの名称** … `reasoning_content` 以外に `reasoning` / `thinking` / `thought` などで返す API がある → これらをまとめて標準出力に流します（通常は推論が先に、続けて `content`）。
+- **推論フィールドの名称** … `reasoning_content` 以外に `reasoning` / `thinking` / `thought` などで返す API がある → **既定ではユーザー向け回答の `content`（と `refusal`）だけ**を標準出力へ出し、推論は出しません。デバッグで推論も見たいときは `CHAT_SHOW_REASONING=1` を指定してください。
 - **`content` の形** … 文字列だけでなく、`type: "text"` のブロックの配列で返す実装に対応します。
 
 大規模モデル（例: `nvidia/nemotron-3-super-120b-a12b`）は **最初のトークンまで数十秒〜数分かかる**ことがあります。ログに path が出たあと無言に見える場合は、しばらく待つか、`CHAT_HTTP_TIMEOUT_SECONDS` をさらに延ばしてください。ストリームが不安定なら `CHAT_STREAM=0` で非ストリーム固定にすると確実です。

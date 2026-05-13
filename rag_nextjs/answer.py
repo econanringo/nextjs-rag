@@ -52,13 +52,16 @@ def _get_client() -> OpenAI:
     return OpenAI(**kwargs)
 
 
-# OpenAI 互換 API が delta に載せる推論テキスト系フィールド（ベンダー差を吸収）
+# OpenAI 互換 API が delta / message に載せる推論テキスト系フィールド（既定ではstdoutに出さない）
 _DELTA_REASONING_KEYS: tuple[str, ...] = (
     "reasoning_content",
     "reasoning",
     "thinking",
     "thought",
 )
+
+# content が配列のとき、type で推論ブロックとみなして除外する値
+_CONTENT_REASONING_TYPES: frozenset[str] = frozenset({"reasoning", "thinking", "thought"})
 
 
 def _get_str_field(obj: Any, key: str) -> str | None:
@@ -73,7 +76,7 @@ def _get_str_field(obj: Any, key: str) -> str | None:
     return None
 
 
-def _stringify_content_field(content: Any) -> str | None:
+def _stringify_content_field(content: Any, *, include_reasoning: bool) -> str | None:
     """message / delta の content が str だけでなく list[dict] 形式のときに連結して返す。"""
     if content is None:
         return None
@@ -86,6 +89,13 @@ def _stringify_content_field(content: Any) -> str | None:
                 parts.append(block)
                 continue
             if isinstance(block, Mapping):
+                bt = block.get("type")
+                if (
+                    not include_reasoning
+                    and isinstance(bt, str)
+                    and bt.strip().lower() in _CONTENT_REASONING_TYPES
+                ):
+                    continue
                 t = block.get("text")
                 if isinstance(t, str) and t:
                     parts.append(t)
@@ -98,51 +108,53 @@ def _stringify_content_field(content: Any) -> str | None:
     return None
 
 
-def _iter_delta_text_parts(delta: Any) -> Iterator[str]:
+def _iter_delta_text_parts(delta: Any, *, include_reasoning: bool) -> Iterator[str]:
     """ストリーミング chunk の delta から、表示すべき文字列を順に取り出す。"""
     if delta is None:
         return
-    for key in _DELTA_REASONING_KEYS:
-        s = _get_str_field(delta, key)
-        if s:
-            yield s
+    if include_reasoning:
+        for key in _DELTA_REASONING_KEYS:
+            s = _get_str_field(delta, key)
+            if s:
+                yield s
     ref = _get_str_field(delta, "refusal")
     if ref:
         yield ref
     raw_c = getattr(delta, "content", None) if not isinstance(delta, Mapping) else delta.get("content")
-    c = _stringify_content_field(raw_c)
+    c = _stringify_content_field(raw_c, include_reasoning=include_reasoning)
     if c:
         yield c
 
 
-def _iter_message_text_parts(message: Any) -> Iterator[str]:
+def _iter_message_text_parts(message: Any, *, include_reasoning: bool) -> Iterator[str]:
     """非ストリーミング応答の message から表示用テキストを取り出す。"""
     if message is None:
         return
-    for key in _DELTA_REASONING_KEYS:
-        s = _get_str_field(message, key)
-        if s:
-            yield s
+    if include_reasoning:
+        for key in _DELTA_REASONING_KEYS:
+            s = _get_str_field(message, key)
+            if s:
+                yield s
     ref = _get_str_field(message, "refusal")
     if ref:
         yield ref
     raw_c = getattr(message, "content", None) if not isinstance(message, Mapping) else message.get(
         "content"
     )
-    c = _stringify_content_field(raw_c)
+    c = _stringify_content_field(raw_c, include_reasoning=include_reasoning)
     if c:
         yield c
 
 
-def _iter_chunk_text_parts(chunk: Any) -> Iterator[str]:
+def _iter_chunk_text_parts(chunk: Any, *, include_reasoning: bool) -> Iterator[str]:
     """ChatCompletionChunk 互換オブジェクトからテキスト断片を取り出す。"""
     choices = getattr(chunk, "choices", None) or []
     for choice in choices:
         delta = getattr(choice, "delta", None)
-        yield from _iter_delta_text_parts(delta)
+        yield from _iter_delta_text_parts(delta, include_reasoning=include_reasoning)
         # 一部プロキシはストリーム終端付近で message に本文だけ載せる
         msg = getattr(choice, "message", None)
-        yield from _iter_message_text_parts(msg)
+        yield from _iter_message_text_parts(msg, include_reasoning=include_reasoning)
 
 
 def _model_name() -> str:
@@ -222,7 +234,12 @@ def _build_chat_completion_kwargs(question: str, context: str, *, stream: bool) 
     return kwargs
 
 
-def _non_stream_completion(client: OpenAI, kwargs: dict[str, Any]) -> Iterator[str]:
+def _non_stream_completion(
+    client: OpenAI,
+    kwargs: dict[str, Any],
+    *,
+    include_reasoning: bool,
+) -> Iterator[str]:
     kw = dict(kwargs)
     kw["stream"] = False
     kw.pop("stream_options", None)
@@ -232,7 +249,7 @@ def _non_stream_completion(client: OpenAI, kwargs: dict[str, Any]) -> Iterator[s
         yield "[エラー] API 応答に choices がありません。"
         return
     msg = getattr(choices[0], "message", None)
-    parts = list(_iter_message_text_parts(msg))
+    parts = list(_iter_message_text_parts(msg, include_reasoning=include_reasoning))
     if parts:
         for p in parts:
             yield p
@@ -249,10 +266,11 @@ def stream_answer(question: str, context: str) -> Iterator[str]:
     client = _get_client()
     use_stream = _env_bool("CHAT_STREAM", True)
     fb = _env_bool("CHAT_STREAM_FALLBACK", True)
+    include_reasoning = _env_bool("CHAT_SHOW_REASONING", False)
 
     if not use_stream:
         kwargs = _build_chat_completion_kwargs(question, context, stream=False)
-        yield from _non_stream_completion(client, kwargs)
+        yield from _non_stream_completion(client, kwargs, include_reasoning=include_reasoning)
         return
 
     kwargs_stream = _build_chat_completion_kwargs(question, context, stream=True)
@@ -261,7 +279,7 @@ def stream_answer(question: str, context: str) -> Iterator[str]:
     got_text = False
     try:
         for chunk in stream:
-            for piece in _iter_chunk_text_parts(chunk):
+            for piece in _iter_chunk_text_parts(chunk, include_reasoning=include_reasoning):
                 got_text = True
                 yield piece
     finally:
@@ -271,7 +289,7 @@ def stream_answer(question: str, context: str) -> Iterator[str]:
 
     if not got_text and fb:
         kwargs_ns = _build_chat_completion_kwargs(question, context, stream=False)
-        yield from _non_stream_completion(client, kwargs_ns)
+        yield from _non_stream_completion(client, kwargs_ns, include_reasoning=include_reasoning)
 
 
 async def run_rag_cli(question: str, top_k: int, *, quiet: bool = False) -> None:

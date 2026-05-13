@@ -17,6 +17,7 @@ Next.js 公式ドキュメント RAG（retrieve: next-devtools-mcp の nextjs_do
   CHAT_MODEL（既定: nvidia/nemotron-3-nano-30b-a3b）
   CHAT_STREAM（既定: 1。0 で常に非ストリーミング）
   CHAT_STREAM_FALLBACK（既定: 1。ストリームから本文が得られないとき非ストリームで再試行）
+  CHAT_SHOW_REASONING（既定: 0。推論モデルの内部推論を標準出力に出すとき 1）
   CHAT_MAX_TOKENS（任意）
   CHAT_HTTP_TIMEOUT_SECONDS / OPENAI_TIMEOUT / HTTP_TIMEOUT（秒、既定 600）
   CHAT_HTTP_CONNECT_SECONDS（接続タイムアウト秒、既定 30）
